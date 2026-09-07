@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Сортировка треков в ваших плейлистах Spotify."""
+"""Sort tracks in your Spotify playlists."""
 
 from __future__ import annotations
 
@@ -103,9 +103,11 @@ class SpotifyAPI:
     def _authorization_code_flow(self) -> None:
         state = secrets.token_urlsafe(16)
         code_verifier = secrets.token_urlsafe(64)
-        challenge = base64.urlsafe_b64encode(
-            hashlib.sha256(code_verifier.encode()).digest()
-        ).rstrip(b"=").decode()
+        challenge = (
+            base64.urlsafe_b64encode(hashlib.sha256(code_verifier.encode()).digest())
+            .rstrip(b"=")
+            .decode()
+        )
 
         params = {
             "client_id": self.client_id,
@@ -159,20 +161,20 @@ class SpotifyAPI:
         thread = threading.Thread(target=server.handle_request, daemon=True)
         thread.start()
 
-        print("\nОткройте ссылку в браузере и разрешите доступ:")
+        print("\nOpen this link in your browser and approve access:")
         print(url)
         print()
         webbrowser.open(url)
 
         if not event.wait(timeout=180):
             server.server_close()
-            raise AuthError("Таймаут авторизации (3 минуты). Запустите снова.")
+            raise AuthError("Authorization timed out (3 minutes). Run again.")
 
         server.server_close()
         if "error" in result:
-            raise AuthError(f"Spotify отклонил доступ: {result['error']}")
+            raise AuthError(f"Spotify denied access: {result['error']}")
         if "code" not in result:
-            raise AuthError("Не получен authorization code.")
+            raise AuthError("No authorization code received.")
 
         token_data = {
             "grant_type": "authorization_code",
@@ -188,9 +190,9 @@ class SpotifyAPI:
             timeout=30,
         )
         if resp.status_code != 200:
-            raise AuthError(f"Не удалось получить токен: {resp.status_code} {resp.text}")
+            raise AuthError(f"Failed to get token: {resp.status_code} {resp.text}")
         self._set_tokens(resp.json())
-        print("Авторизация успешна.\n")
+        print("Authorization successful.\n")
 
     def request(self, method: str, path: str, **kwargs: Any) -> Any:
         if not self._refresh_if_needed():
@@ -232,16 +234,23 @@ class SpotifyAPI:
 
     def get_playlist_items(self, playlist_id: str) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
-        url = f"/playlists/{playlist_id}/items?limit=50&additional_types=track,episode"
+        url = (
+            f"/playlists/{playlist_id}/items?limit=50"
+            f"&additional_types=track,episode&market=from_token"
+        )
         while url:
             data = self.request("GET", url)
             items.extend(data.get("items", []))
             next_url = data.get("next")
             url = next_url.replace(API_BASE, "") if next_url else ""
+        # Newer Web API puts the object in "item"; older responses use "track".
+        for row in items:
+            if not row.get("track") and row.get("item"):
+                row["track"] = row["item"]
         return items
 
     def replace_playlist_items(self, playlist_id: str, uris: list[str]) -> None:
-        # Первый чанк — полная замена, остальные — добавление.
+        # First chunk replaces the playlist; remaining chunks are appended.
         first = uris[:CHUNK]
         self.request(
             "PUT",
@@ -257,8 +266,13 @@ class SpotifyAPI:
             )
 
 
-def track_uri(item: dict[str, Any]) -> str | None:
+def playlist_track(item: dict[str, Any]) -> dict[str, Any]:
     track = item.get("track") or item.get("item") or {}
+    return track if isinstance(track, dict) else {}
+
+
+def track_uri(item: dict[str, Any]) -> str | None:
+    track = playlist_track(item)
     if not track or track.get("is_local"):
         return None
     uri = track.get("uri")
@@ -269,7 +283,7 @@ def track_uri(item: dict[str, Any]) -> str | None:
 
 def sort_key_fn(mode: str) -> Callable[[dict[str, Any]], tuple]:
     def artist(item: dict[str, Any]) -> tuple:
-        track = item.get("track") or {}
+        track = playlist_track(item)
         artists = track.get("artists") or []
         name = (artists[0].get("name") if artists else "") or ""
         album = (track.get("album") or {}).get("name") or ""
@@ -279,7 +293,7 @@ def sort_key_fn(mode: str) -> Callable[[dict[str, Any]], tuple]:
         return (name.casefold(), album.casefold(), disc, num, title.casefold())
 
     def album(item: dict[str, Any]) -> tuple:
-        track = item.get("track") or {}
+        track = playlist_track(item)
         album_obj = track.get("album") or {}
         album_name = album_obj.get("name") or ""
         artists = track.get("artists") or []
@@ -290,7 +304,7 @@ def sort_key_fn(mode: str) -> Callable[[dict[str, Any]], tuple]:
         return (album_name.casefold(), artist_name.casefold(), disc, num, title.casefold())
 
     def title(item: dict[str, Any]) -> tuple:
-        track = item.get("track") or {}
+        track = playlist_track(item)
         return ((track.get("name") or "").casefold(),)
 
     def added_at(item: dict[str, Any]) -> tuple:
@@ -308,44 +322,44 @@ def pick_playlist(playlists: list[dict[str, Any]], me_id: str) -> dict[str, Any]
     owned = []
     for i, p in enumerate(playlists, 1):
         owner = (p.get("owner") or {}).get("id")
-        flag = " (ваш)" if owner == me_id else ""
-        print(f"{i:3}. {p.get('name')} — {p.get('tracks', {}).get('total', '?')} треков{flag}")
+        flag = " (yours)" if owner == me_id else ""
+        print(f"{i:3}. {p.get('name')} — {p.get('tracks', {}).get('total', '?')} tracks{flag}")
         owned.append(p)
 
     while True:
-        raw = input("\nНомер плейлиста: ").strip()
+        raw = input("\nPlaylist number: ").strip()
         if not raw.isdigit():
-            print("Введите номер.")
+            print("Enter a number.")
             continue
         idx = int(raw)
         if 1 <= idx <= len(owned):
             return owned[idx - 1]
-        print("Нет такого номера.")
+        print("No such number.")
 
 
 def confirm(prompt: str) -> bool:
-    return input(f"{prompt} [y/N]: ").strip().lower() in {"y", "yes", "д", "да"}
+    return input(f"{prompt} [y/N]: ").strip().lower() in {"y", "yes"}
 
 
 def main() -> int:
     load_dotenv()
-    parser = argparse.ArgumentParser(description="Сортировка плейлиста Spotify")
+    parser = argparse.ArgumentParser(description="Sort a Spotify playlist")
     parser.add_argument(
         "--by",
         choices=SORT_KEYS,
         default=None,
-        help="Критерий сортировки: artist, album, title, added_at",
+        help="Sort key: artist, album, title, added_at",
     )
-    parser.add_argument("--playlist", help="ID или URL плейлиста (иначе выбор из списка)")
+    parser.add_argument("--playlist", help="Playlist ID or URL (otherwise pick from a list)")
     parser.add_argument(
         "--desc",
         action="store_true",
-        help="Сортировать по убыванию",
+        help="Sort descending",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Только показать порядок, не менять плейлист",
+        help="Preview order only; do not modify the playlist",
     )
     args = parser.parse_args()
 
@@ -355,10 +369,10 @@ def main() -> int:
 
     if not client_id or not client_secret:
         print(
-            "Нужны SPOTIFY_CLIENT_ID и SPOTIFY_CLIENT_SECRET.\n"
-            "1) Скопируйте .env.example → .env\n"
-            "2) Вставьте ключи из Spotify Developer Dashboard\n"
-            "См. README.md"
+            "SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET are required.\n"
+            "1) Copy .env.example → .env\n"
+            "2) Paste keys from the Spotify Developer Dashboard\n"
+            "See README.md"
         )
         return 1
 
@@ -366,12 +380,12 @@ def main() -> int:
     try:
         api.authenticate()
     except AuthError as e:
-        print(f"Ошибка авторизации: {e}")
+        print(f"Authorization error: {e}")
         return 1
 
     me = api.get_me()
     me_id = me["id"]
-    print(f"Вы вошли как: {me.get('display_name') or me_id}")
+    print(f"Signed in as: {me.get('display_name') or me_id}")
 
     if args.playlist:
         playlist_id = args.playlist.strip()
@@ -381,67 +395,74 @@ def main() -> int:
     else:
         playlists = api.get_my_playlists()
         if not playlists:
-            print("Плейлистов не найдено.")
+            print("No playlists found.")
             return 1
         playlist = pick_playlist(playlists, me_id)
 
     playlist_id = playlist["id"]
     owner_id = (playlist.get("owner") or {}).get("id")
     if owner_id != me_id:
-        print("Внимание: этот плейлист не ваш. Изменение может не пройти.")
+        print("Warning: this playlist is not yours. Changes may fail.")
 
     mode = args.by
     if not mode:
-        print("\nСортировать по:")
+        print("\nSort by:")
         for i, key in enumerate(SORT_KEYS, 1):
             labels = {
-                "artist": "исполнителю (+ альбом, № трека)",
-                "album": "альбому (+ № трека)",
-                "title": "названию трека",
-                "added_at": "дате добавления",
+                "artist": "artist (+ album, track number)",
+                "album": "album (+ track number)",
+                "title": "track title",
+                "added_at": "date added",
             }
             print(f"  {i}. {key} — {labels[key]}")
         while True:
-            raw = input("Выбор (1-4): ").strip()
+            raw = input("Choice (1-4): ").strip()
             if raw.isdigit() and 1 <= int(raw) <= 4:
                 mode = SORT_KEYS[int(raw) - 1]
                 break
             if raw in SORT_KEYS:
                 mode = raw
                 break
-            print("Введите 1–4 или имя критерия.")
+            print("Enter 1–4 or a sort key name.")
 
-    print(f"\nЗагружаю треки: «{playlist.get('name')}»…")
+    print(f"\nLoading tracks: “{playlist.get('name')}”…")
     items = api.get_playlist_items(playlist_id)
     sortable = [it for it in items if track_uri(it)]
     skipped = len(items) - len(sortable)
     if skipped:
-        print(f"Пропущено локальных/пустых позиций: {skipped}")
+        print(f"Skipped local/empty items: {skipped}")
 
     key_fn = sort_key_fn(mode)
     sorted_items = sorted(sortable, key=key_fn, reverse=args.desc)
     uris = [track_uri(it) for it in sorted_items]
     uris = [u for u in uris if u]
 
-    print(f"Треков к записи: {len(uris)}")
-    print("Первые 10 после сортировки:")
+    print(f"Tracks to write: {len(uris)}")
+    print("First 10 after sorting:")
     for i, it in enumerate(sorted_items[:10], 1):
-        track = it.get("track") or {}
-        artists = ", ".join(a.get("name", "") for a in (track.get("artists") or []))
-        album = (track.get("album") or {}).get("name", "")
-        print(f"  {i}. {artists} — {track.get('name')} [{album}]")
+        track = playlist_track(it)
+        name = track.get("name") or "(untitled / unavailable)"
+        if track.get("type") == "episode":
+            show = (track.get("show") or {}).get("name") or ""
+            print(f"  {i}. {show} — {name}")
+        else:
+            artists = ", ".join(
+                a.get("name", "") for a in (track.get("artists") or []) if a.get("name")
+            ) or "(no artist)"
+            album = (track.get("album") or {}).get("name") or ""
+            print(f"  {i}. {artists} — {name} [{album}]")
 
     if args.dry_run:
-        print("\n--dry-run: плейлист не изменён.")
+        print("\n--dry-run: playlist was not changed.")
         return 0
 
-    if not confirm(f"\nПерезаписать порядок в «{playlist.get('name')}»?"):
-        print("Отменено.")
+    if not confirm(f"\nOverwrite order in “{playlist.get('name')}”?"):
+        print("Cancelled.")
         return 0
 
-    print("Записываю новый порядок…")
+    print("Writing new order…")
     api.replace_playlist_items(playlist_id, uris)
-    print("Готово.")
+    print("Done.")
     return 0
 
 
@@ -449,5 +470,5 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except KeyboardInterrupt:
-        print("\nПрервано.")
+        print("\nInterrupted.")
         raise SystemExit(130)
